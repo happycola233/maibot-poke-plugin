@@ -1,0 +1,44 @@
+{
+  "manifest_version": 2,
+  "id": "github.happycola233.maibot-poke-plugin",
+  "version": "1.0.0",
+  "name": "MaiBot 戳一戳插件",
+  "description": "将 SnowLuma Adapter 的 QQ 戳一戳能力注册为模型可自主调用的 send_poke 工具。",
+  "author": {
+    "name": "happycola233",
+    "url": "https://github.com/happycola233"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/happycola233/maibot-poke-plugin",
+    "homepage": "https://github.com/happycola233/maibot-poke-plugin",
+    "documentation": "https://github.com/happycola233/maibot-poke-plugin/blob/main/README.md",
+    "issues": "https://github.com/happycola233/maibot-poke-plugin/issues"
+  },
+  "host_application": {
+    "min_version": "1.0.6",
+    "max_version": "1.1.99"
+  },
+  "sdk": {
+    "min_version": "2.7.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "plugin",
+      "id": "maibot-team.snowluma-adapter",
+      "version_spec": ">=0.8.4,<1.0.0"
+    }
+  ],
+  "plugin_type": "tool",
+  "capabilities": [
+    "message.get_by_id",
+    "api.call"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}
