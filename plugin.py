@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
+import time
 from typing import Any, ClassVar
 
 from maibot_sdk import Field, MaiBotPlugin, PluginConfigBase, Tool
 
 
 SNOWLUMA_SEND_POKE_API = "maibot-team.snowluma-adapter.adapter.napcat.message.send_poke"
+RECENT_POKE_LIMIT = 20
+RECENT_POKE_MAX_AGE_SECONDS = 120.0
+RECENT_POKE_FUTURE_TOLERANCE_SECONDS = 5.0
+POKE_NOTICE_ID_PREFIX = "notice:notify:poke:"
+PokeNoticeIdentity = tuple[str, str]
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -86,34 +93,41 @@ class PokePlugin(MaiBotPlugin):
         description=(
             "戳一戳是 QQ 的轻量互动功能，可用于提及或提醒某人、引起对方注意，但比直接 @ 或点名更不明显、更含蓄。"
             "当普通 QQ 群聊或私聊语境适合用这种方式互动时，向指定消息的发送者发送一次真实的戳一戳；"
-            "目标用户不需要先戳机器人。msg_id 必须是目标用户在当前 QQ 会话中发送的消息 ID，"
-            "禁止使用其他会话或其他平台的消息。"
+            "目标用户不需要先戳机器人。要戳普通消息的发送者时传入该消息的 msg_id；"
+            "如果刚有人戳了机器人、通知没有可见的 msg_id，可以省略此参数，工具只会尝试戳回当前 QQ 会话中"
+            "最新、足够新且能唯一确认的戳一戳发起者。禁止使用其他会话或其他平台的消息。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "msg_id": {
                     "type": "string",
-                    "description": "目标用户在当前 QQ 会话中发送的消息 ID",
+                    "description": (
+                        "可选。目标用户在当前 QQ 会话中发送的消息 ID；仅在刚收到发给机器人的戳一戳通知且通知没有可见消息 ID 时省略"
+                    ),
                     "minLength": 1,
                 }
             },
-            "required": ["msg_id"],
+            "required": [],
             "additionalProperties": False,
         },
         visibility="visible",
     )
     async def send_poke(
-        self, msg_id: str, stream_id: str = "", **kwargs: Any
+        self, msg_id: str | None = None, stream_id: str = "", **kwargs: Any
     ) -> dict[str, Any]:
-        """确认目标消息属于当前会话后，戳一戳该消息的发送者。"""
+        """确认目标属于当前会话后，戳一戳该消息或最近通知的发送者。"""
 
-        message_id = str(msg_id or "").strip()
-        current_stream_id = str(stream_id or "").strip()
-        if not message_id:
+        if msg_id is not None and not isinstance(msg_id, str):
             return self._failure(
-                "发送戳一戳失败：msg_id 不能为空。", stage="validation"
+                "发送戳一戳失败：msg_id 必须是字符串。", stage="validation"
             )
+        message_id = str(msg_id or "").strip()
+        if msg_id is not None and not message_id:
+            return self._failure(
+                "发送戳一戳失败：msg_id 为空时请省略该参数。", stage="validation"
+            )
+        current_stream_id = str(stream_id or "").strip()
         if not current_stream_id:
             return self._failure(
                 "发送戳一戳失败：Host 未注入当前会话的 stream_id，已拒绝进行全局消息查询。",
@@ -141,6 +155,24 @@ class PokePlugin(MaiBotPlugin):
                 platform=context_platform or None,
             )
 
+        target_source = "msg_id"
+        expected_recent_identity: PokeNoticeIdentity | None = None
+        if msg_id is None:
+            # 通知 ID 不展示给模型时，只查看当前会话的最新时间点；不在历史通知中猜测目标。
+            (
+                expected_recent_identity,
+                resolution_error,
+            ) = await self._resolve_recent_poke_identity(current_stream_id)
+            if resolution_error is not None:
+                return resolution_error
+            if expected_recent_identity is None:
+                return self._failure(
+                    "发送戳一戳失败：无法确定最近戳一戳通知的身份。",
+                    stage="message.get_recent",
+                )
+            message_id = expected_recent_identity[0]
+            target_source = "recent_poke"
+
         # 查询时始终附带当前 stream_id，不允许仅凭全局唯一性假设读取其他会话的消息。
         try:
             message_result = await self.ctx.message.get_by_id(
@@ -161,10 +193,13 @@ class PokePlugin(MaiBotPlugin):
                 stage="message.get_by_id",
             )
         if message_result is None:
+            missing_message_details = (
+                {"msg_id": message_id} if target_source == "msg_id" else {}
+            )
             return self._failure(
                 "发送戳一戳失败：当前会话中找不到该 msg_id 对应的消息；不会查询或操作其他会话。",
                 stage="message.get_by_id",
-                msg_id=message_id,
+                **missing_message_details,
             )
         if not isinstance(message_result, Mapping):
             return self._failure(
@@ -192,6 +227,23 @@ class PokePlugin(MaiBotPlugin):
                 stage="validation",
                 platform=message_platform or None,
             )
+
+        if target_source == "msg_id" and message.get("is_notify") is True:
+            return self._failure(
+                "发送戳一戳失败：显式 msg_id 必须指向用户发送的普通消息，不能使用通知消息 ID。",
+                stage="validation",
+            )
+        if target_source == "recent_poke":
+            # get_recent 与 get_by_id 的结果必须指向同一通知身份，避免查询之间目标发生变化。
+            confirmed_identity = self._poke_notice_identity(
+                message,
+                current_stream_id,
+            )
+            if confirmed_identity != expected_recent_identity:
+                return self._failure(
+                    "发送戳一戳失败：最近戳一戳通知在复核时身份不一致，已拒绝发送。",
+                    stage="validation",
+                )
 
         message_info = message.get("message_info")
         if not isinstance(message_info, Mapping):
@@ -304,16 +356,170 @@ class PokePlugin(MaiBotPlugin):
             if group_id is not None
             else f"私聊 QQ 用户 {user_id}"
         )
-        return {
+        source_description = (
+            "根据当前会话最新的戳一戳通知，" if target_source == "recent_poke" else ""
+        )
+        result: dict[str, Any] = {
             "success": True,
-            "content": f"已成功戳一戳{target}。",
-            "msg_id": message_id,
+            "content": f"已{source_description}成功戳一戳{target}。",
             "user_id": user_id,
             "group_id": group_id,
             "chat_type": chat_type,
+            "target_source": target_source,
             "status": status,
             "retcode": retcode,
         }
+        if target_source == "msg_id":
+            result["msg_id"] = message_id
+        return result
+
+    async def _resolve_recent_poke_identity(
+        self, current_stream_id: str
+    ) -> tuple[PokeNoticeIdentity | None, dict[str, Any] | None]:
+        """从当前会话的最新消息中解析可安全回戳的通知身份。"""
+
+        try:
+            recent_result = await self.ctx.message.get_recent(
+                current_stream_id,
+                limit=RECENT_POKE_LIMIT,
+            )
+        except Exception as exc:
+            return None, self._failure(
+                f"发送戳一戳失败：调用 Host 的 message.get_recent 时发生异常：{exc}",
+                stage="message.get_recent",
+            )
+
+        host_error = self._host_error(recent_result)
+        if host_error is not None:
+            return None, self._failure(
+                f"发送戳一戳失败：Host 查询最近消息失败：{host_error}",
+                stage="message.get_recent",
+            )
+        if not isinstance(recent_result, list):
+            return None, self._failure(
+                "发送戳一戳失败：Host 返回了无效的最近消息列表。",
+                stage="message.get_recent",
+            )
+        if not recent_result:
+            return None, self._failure(
+                "发送戳一戳失败：当前 QQ 会话中没有可用于回戳的最近消息。",
+                stage="message.get_recent",
+            )
+
+        timestamped_messages: list[tuple[float, Mapping[str, Any]]] = []
+        for recent_message in recent_result:
+            if not isinstance(recent_message, Mapping):
+                return None, self._failure(
+                    "发送戳一戳失败：Host 返回的最近消息格式无效。",
+                    stage="message.get_recent",
+                )
+            message_timestamp = self._timestamp(recent_message.get("timestamp"))
+            if message_timestamp is None:
+                return None, self._failure(
+                    "发送戳一戳失败：最近消息缺少有效时间，无法判断通知是否仍然新鲜。",
+                    stage="message.get_recent",
+                )
+            timestamped_messages.append((message_timestamp, recent_message))
+
+        latest_timestamp = max(item[0] for item in timestamped_messages)
+        latest_messages = [
+            message
+            for message_timestamp, message in timestamped_messages
+            if message_timestamp == latest_timestamp
+        ]
+        age_seconds = time.time() - latest_timestamp
+        if (
+            age_seconds < -RECENT_POKE_FUTURE_TOLERANCE_SECONDS
+            or age_seconds > RECENT_POKE_MAX_AGE_SECONDS
+        ):
+            return None, self._failure(
+                "发送戳一戳失败：当前会话最新消息不是刚刚收到的通知，不能在缺少 msg_id 时确定目标。",
+                stage="message.get_recent",
+            )
+
+        identities = [
+            self._poke_notice_identity(message, current_stream_id)
+            for message in latest_messages
+        ]
+        if any(identity is None for identity in identities):
+            return None, self._failure(
+                "发送戳一戳失败：当前会话最新消息不是可确认的、发给机器人的 QQ 戳一戳通知；请提供 msg_id。",
+                stage="message.get_recent",
+            )
+
+        confirmed_identities = [
+            identity for identity in identities if identity is not None
+        ]
+        actor_user_ids = {identity[1] for identity in confirmed_identities}
+        if len(actor_user_ids) != 1:
+            # SnowLuma 通知时间精度为秒；同秒出现多位发起者时不能依赖数据库返回顺序。
+            return None, self._failure(
+                "发送戳一戳失败：同一最新时间点有多位用户戳了机器人，无法唯一确认回戳目标。",
+                stage="message.get_recent",
+            )
+
+        selected_identity = sorted(
+            confirmed_identities, key=lambda identity: identity[0]
+        )[-1]
+        return selected_identity, None
+
+    @classmethod
+    def _poke_notice_identity(
+        cls, message: Mapping[str, Any], current_stream_id: str
+    ) -> PokeNoticeIdentity | None:
+        """验证 SnowLuma 戳一戳通知，并返回内部消息 ID 与发起者 ID。"""
+
+        message_id = str(message.get("message_id") or "").strip()
+        if not message_id.startswith(POKE_NOTICE_ID_PREFIX):
+            return None
+        if str(message.get("session_id") or "").strip() != current_stream_id:
+            return None
+        if str(message.get("platform") or "").strip().casefold() != "qq":
+            return None
+        if message.get("is_notify") is not True:
+            return None
+
+        message_info = message.get("message_info")
+        if not isinstance(message_info, Mapping):
+            return None
+        user_info = message_info.get("user_info")
+        additional_config = message_info.get("additional_config")
+        if not isinstance(user_info, Mapping) or not isinstance(
+            additional_config, Mapping
+        ):
+            return None
+        if str(additional_config.get("snowluma_notice_type") or "").strip() != "notify":
+            return None
+        if (
+            str(additional_config.get("snowluma_notice_sub_type") or "").strip()
+            != "poke"
+        ):
+            return None
+
+        actor_user_id = cls._qq_id(user_info.get("user_id"))
+        target_id = cls._qq_id(additional_config.get("target_id"))
+        self_id = cls._qq_id(additional_config.get("self_id"))
+        if (
+            actor_user_id is None
+            or target_id is None
+            or self_id is None
+            or target_id != self_id
+            or actor_user_id == self_id
+        ):
+            return None
+        return message_id, actor_user_id
+
+    @staticmethod
+    def _timestamp(value: Any) -> float | None:
+        """解析 Host 消息时间戳，只接受有限的正数。"""
+
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(timestamp) or timestamp <= 0:
+            return None
+        return timestamp
 
     @staticmethod
     def _host_error(result: Any) -> str | None:
