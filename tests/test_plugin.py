@@ -195,16 +195,30 @@ class ToolDeclarationTests(unittest.TestCase):
         self.assertEqual(component["type"], "TOOL")
         metadata = component["metadata"]
         self.assertEqual(metadata["visibility"], "visible")
-        self.assertIn("QQ 的轻量互动功能", metadata["description"])
-        self.assertIn("比直接 @ 或点名更不明显、更含蓄", metadata["description"])
+        self.assertIn("QQ 的轻量互动", metadata["description"])
+        self.assertIn("比直接 @ 或点名更含蓄", metadata["description"])
         self.assertIn("目标用户不需要先戳机器人", metadata["description"])
-        self.assertIn("真实的戳一戳", metadata["description"])
-        self.assertIn("可以省略此参数", metadata["description"])
-        self.assertIn("最新、足够新且能唯一确认", metadata["description"])
+        self.assertIn("戳一戳某条消息的发送者", metadata["description"])
+        self.assertIn("两种用法", metadata["description"])
+        self.assertIn("真实的 msg_id", metadata["description"])
+        self.assertIn("最新的消息是戳向机器人的戳一戳消息", metadata["description"])
+        self.assertIn("唯一锁定同一个人", metadata["description"])
+        self.assertIn("才省略 msg_id、以 {} 调用", metadata["description"])
+        self.assertIn("空字符串、纯空白或随手填的内容", metadata["description"])
+        self.assertIn("不会自动挑最近的普通消息", metadata["description"])
+        self.assertIn("通知消息的 ID 也不能当作 msg_id", metadata["description"])
         schema = metadata["parameters_raw"]
         self.assertEqual(set(schema["properties"]), {"msg_id"})
         self.assertEqual(schema["required"], [])
         self.assertIs(schema["additionalProperties"], False)
+        msg_id_schema = schema["properties"]["msg_id"]
+        self.assertEqual(msg_id_schema["type"], "string")
+        self.assertEqual(msg_id_schema["minLength"], 1)
+        # 参数说明只讲字段本身，回戳的完整触发条件放在工具 description 里，避免重复。
+        self.assertIn("真实的 msg_id", msg_id_schema["description"])
+        self.assertIn("省略此参数、以 {} 调用", msg_id_schema["description"])
+        self.assertIn("触发条件见工具说明", msg_id_schema["description"])
+        self.assertIn("也不能是通知消息的 ID", msg_id_schema["description"])
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -258,7 +272,7 @@ class ManifestContractTests(unittest.TestCase):
 
         self.assertEqual(manifest["manifest_version"], 2)
         self.assertEqual(manifest["id"], "github.happycola233.maibot-poke-plugin")
-        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["version"], "1.1.1")
         self.assertEqual(manifest["plugin_type"], "tool")
         self.assertEqual(manifest["sdk"]["min_version"], "2.7.0")
         self.assertEqual(
@@ -275,15 +289,47 @@ class ManifestContractTests(unittest.TestCase):
 
 class SendPokeTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_blank_msg_id_is_rejected_before_query(self) -> None:
-        plugin, message, api = build_plugin(qq_message())
+        for blank_msg_id in ("", " ", " \t\n"):
+            with self.subTest(msg_id=repr(blank_msg_id)):
+                plugin, message, api = build_plugin(qq_message())
 
-        result = await invoke_send_poke(plugin, msg_id="   ")
+                result = await invoke_send_poke(plugin, msg_id=blank_msg_id)
 
-        self.assertFalse(result["success"])
-        self.assertIn("msg_id", result["content"])
-        self.assertEqual(message.calls, [])
-        self.assertEqual(message.recent_calls, [])
-        self.assertEqual(api.calls, [])
+                self.assertFalse(result["success"])
+                self.assertEqual(result["stage"], "validation")
+                self.assertIn("空字符串或纯空白", result["content"])
+                self.assertIn("不等于省略", result["content"])
+                self.assertIn("真实的 msg_id", result["content"])
+                self.assertIn("省略 msg_id、以 {} 调用", result["content"])
+                self.assertEqual(message.calls, [])
+                self.assertEqual(message.recent_calls, [])
+                self.assertEqual(api.calls, [])
+
+    async def test_omitted_msg_id_uses_recent_poke_fallback(self) -> None:
+        notice = poke_notice()
+        plugin, message, api = build_plugin(
+            notice,
+            {"status": "ok", "retcode": 0, "data": None},
+            recent_result=[notice],
+        )
+
+        with patch("plugin.time.time", return_value=1000.0):
+            result = await plugin.send_poke(
+                stream_id="stream-1",
+                chat_id="stream-1",
+                platform="qq",
+                user_id="123456",
+                group_id="",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["target_source"], "recent_poke")
+        self.assertNotIn("msg_id", result)
+        self.assertEqual(
+            message.recent_calls,
+            [{"chat_id": "stream-1", "limit": 20}],
+        )
+        self.assertEqual(api.calls[0]["kwargs"], {"user_id": "123456"})
 
     async def test_non_string_msg_id_is_rejected_before_query(self) -> None:
         plugin, message, api = build_plugin(qq_message())
@@ -463,8 +509,8 @@ class SendPokeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_recent_poke_requires_fresh_valid_latest_timestamp(self) -> None:
         cases = [
-            (poke_notice(timestamp="800.0"), 1000.0, "不是刚刚收到"),
-            (poke_notice(timestamp="1010.0"), 1000.0, "不是刚刚收到"),
+            (poke_notice(timestamp="800.0"), 1000.0, "不在安全回戳范围内"),
+            (poke_notice(timestamp="1010.0"), 1000.0, "不在安全回戳范围内"),
             (poke_notice(timestamp="nan"), 1000.0, "缺少有效时间"),
             (poke_notice(timestamp="inf"), 1000.0, "缺少有效时间"),
             (poke_notice(timestamp="invalid"), 1000.0, "缺少有效时间"),
@@ -509,6 +555,7 @@ class SendPokeTests(unittest.IsolatedAsyncioTestCase):
                     result = await invoke_send_poke(plugin, msg_id=None)
 
                 self.assertFalse(result["success"])
+                self.assertIn("不是可确认的", result["content"])
                 self.assertIn("请提供 msg_id", result["content"])
                 self.assertEqual(message.calls, [])
                 self.assertEqual(api.calls, [])
@@ -525,6 +572,7 @@ class SendPokeTests(unittest.IsolatedAsyncioTestCase):
             result = await invoke_send_poke(plugin, msg_id=None)
 
         self.assertFalse(result["success"])
+        self.assertIn("不是可确认的", result["content"])
         self.assertIn("请提供 msg_id", result["content"])
         self.assertEqual(message.calls, [])
         self.assertEqual(api.calls, [])

@@ -91,11 +91,14 @@ class PokePlugin(MaiBotPlugin):
     @Tool(
         "send_poke",
         description=(
-            "戳一戳是 QQ 的轻量互动功能，可用于提及或提醒某人、引起对方注意，但比直接 @ 或点名更不明显、更含蓄。"
-            "当普通 QQ 群聊或私聊语境适合用这种方式互动时，向指定消息的发送者发送一次真实的戳一戳；"
-            "目标用户不需要先戳机器人。要戳普通消息的发送者时传入该消息的 msg_id；"
-            "如果刚有人戳了机器人、通知没有可见的 msg_id，可以省略此参数，工具只会尝试戳回当前 QQ 会话中"
-            "最新、足够新且能唯一确认的戳一戳发起者。禁止使用其他会话或其他平台的消息。"
+            "戳一戳是 QQ 的轻量互动功能，可以提醒某人或引起对方注意，比直接 @ 或点名更含蓄。"
+            "当群聊或私聊的语境合适时，可以戳一戳某条消息的发送者（目标用户不需要先戳机器人）。"
+            "有两种用法：①想戳某条普通消息的发送者，就传入这条消息真实的 msg_id；"
+            "②想回戳刚戳过机器人的人，仅当本会话最新的消息是戳向机器人的戳一戳消息，"
+            "且能唯一锁定同一个人时，才省略 msg_id、以 {} 调用。"
+            "空字符串、纯空白或随手填的内容都不是合法 msg_id，也不等于省略，"
+            "省略不会自动挑最近的普通消息；通知消息的 ID 也不能当作 msg_id。"
+            "不符合以上情形就不要调用，也不要使用其他会话或平台的消息。"
         ),
         parameters={
             "type": "object",
@@ -103,7 +106,9 @@ class PokePlugin(MaiBotPlugin):
                 "msg_id": {
                     "type": "string",
                     "description": (
-                        "可选。目标用户在当前 QQ 会话中发送的消息 ID；仅在刚收到发给机器人的戳一戳通知且通知没有可见消息 ID 时省略"
+                        "可选。要戳某条普通消息的发送者时，填这条消息在当前 QQ 会话里真实的 msg_id；"
+                        "它不能为空，也不能是通知消息的 ID。"
+                        "想回戳刚戳过机器人的人时省略此参数、以 {} 调用（触发条件见工具说明）。"
                     ),
                     "minLength": 1,
                 }
@@ -125,7 +130,10 @@ class PokePlugin(MaiBotPlugin):
         message_id = str(msg_id or "").strip()
         if msg_id is not None and not message_id:
             return self._failure(
-                "发送戳一戳失败：msg_id 为空时请省略该参数。", stage="validation"
+                "发送戳一戳失败：msg_id 是空字符串或纯空白，这既不是合法的消息 ID，也不等于省略，本次未执行。"
+                "想戳某条普通消息的发送者，请填这条消息真实的 msg_id；"
+                "想回戳刚戳过机器人的人，请省略 msg_id、以 {} 调用。",
+                stage="validation",
             )
         current_stream_id = str(stream_id or "").strip()
         if not current_stream_id:
@@ -433,7 +441,7 @@ class PokePlugin(MaiBotPlugin):
             or age_seconds > RECENT_POKE_MAX_AGE_SECONDS
         ):
             return None, self._failure(
-                "发送戳一戳失败：当前会话最新消息不是刚刚收到的通知，不能在缺少 msg_id 时确定目标。",
+                "发送戳一戳失败：本会话最新消息的时间不在安全回戳范围内（只接受 120 秒内的戳一戳消息），无法确定回戳目标。",
                 stage="message.get_recent",
             )
 
