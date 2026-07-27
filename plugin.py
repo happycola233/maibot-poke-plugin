@@ -84,7 +84,8 @@ class PokePlugin(MaiBotPlugin):
                 continue
             metadata = component.get("metadata")
             if isinstance(metadata, dict):
-                # SDK 2.7.0 会把装饰器的自定义元数据多嵌套一层，因此在导出组件时显式校正。
+                # TODO: 当 Manifest 的最低 SDK 版本提升至 2.7.1 后，删除此 get_components() 兼容逻辑。
+                # SDK 2.7.0 会将装饰器自定义 metadata 多嵌套一层，导致 visibility 无法按顶层字段读取。
                 metadata["visibility"] = "visible"
         return components
 
