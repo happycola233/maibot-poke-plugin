@@ -183,7 +183,9 @@ async def invoke_send_poke(
 
 
 class ToolDeclarationTests(unittest.TestCase):
-    def test_send_poke_is_visible_and_only_exposes_optional_msg_id(self) -> None:
+    def test_send_poke_is_visible_and_only_exposes_required_nullable_msg_id(
+        self,
+    ) -> None:
         self.assertEqual(
             SNOWLUMA_SEND_POKE_API,
             "maibot-team.snowluma-adapter.adapter.napcat.message.send_poke",
@@ -202,21 +204,19 @@ class ToolDeclarationTests(unittest.TestCase):
         self.assertIn("两种用法", metadata["description"])
         self.assertIn("真实的 msg_id", metadata["description"])
         self.assertIn("最新的消息是戳向机器人的戳一戳消息", metadata["description"])
-        self.assertIn("唯一锁定同一个人", metadata["description"])
-        self.assertIn("才省略 msg_id、以 {} 调用", metadata["description"])
-        self.assertIn("空字符串、纯空白或随手填的内容", metadata["description"])
-        self.assertIn("不会自动挑最近的普通消息", metadata["description"])
-        self.assertIn("通知消息的 ID 也不能当作 msg_id", metadata["description"])
+        self.assertIn("就将 msg_id 设为 null", metadata["description"])
+        self.assertIn("唯一锁定发起者时执行", metadata["description"])
         schema = metadata["parameters_raw"]
         self.assertEqual(set(schema["properties"]), {"msg_id"})
-        self.assertEqual(schema["required"], [])
+        self.assertEqual(schema["required"], ["msg_id"])
         self.assertIs(schema["additionalProperties"], False)
         msg_id_schema = schema["properties"]["msg_id"]
-        self.assertEqual(msg_id_schema["type"], "string")
+        self.assertEqual(msg_id_schema["type"], ["string", "null"])
         self.assertEqual(msg_id_schema["minLength"], 1)
         # 参数说明只讲字段本身，回戳的完整触发条件放在工具 description 里，避免重复。
+        self.assertIn("必填", msg_id_schema["description"])
         self.assertIn("真实的 msg_id", msg_id_schema["description"])
-        self.assertIn("省略此参数、以 {} 调用", msg_id_schema["description"])
+        self.assertIn("回戳刚戳过机器人的人时传 null", msg_id_schema["description"])
         self.assertIn("触发条件见工具说明", msg_id_schema["description"])
         self.assertIn("也不能是通知消息的 ID", msg_id_schema["description"])
 
@@ -242,7 +242,7 @@ class ConfigurationTests(unittest.TestCase):
         schema = PokePlugin.build_config_schema(
             plugin_id="github.happycola233.maibot-poke-plugin",
             plugin_name="MaiBot 戳一戳插件",
-            plugin_version="1.1.0",
+            plugin_version="1.2.0",
             plugin_description="测试描述",
             plugin_author="happycola233",
         )
@@ -272,7 +272,7 @@ class ManifestContractTests(unittest.TestCase):
 
         self.assertEqual(manifest["manifest_version"], 2)
         self.assertEqual(manifest["id"], "github.happycola233.maibot-poke-plugin")
-        self.assertEqual(manifest["version"], "1.1.1")
+        self.assertEqual(manifest["version"], "1.2.0")
         self.assertEqual(manifest["plugin_type"], "tool")
         self.assertEqual(manifest["sdk"]["min_version"], "2.7.0")
         self.assertEqual(
@@ -298,14 +298,14 @@ class SendPokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result["success"])
                 self.assertEqual(result["stage"], "validation")
                 self.assertIn("空字符串或纯空白", result["content"])
-                self.assertIn("不等于省略", result["content"])
+                self.assertIn("不等于 null", result["content"])
                 self.assertIn("真实的 msg_id", result["content"])
-                self.assertIn("省略 msg_id、以 {} 调用", result["content"])
+                self.assertIn("将 msg_id 显式传为 null", result["content"])
                 self.assertEqual(message.calls, [])
                 self.assertEqual(message.recent_calls, [])
                 self.assertEqual(api.calls, [])
 
-    async def test_omitted_msg_id_uses_recent_poke_fallback(self) -> None:
+    async def test_null_msg_id_uses_recent_poke_fallback(self) -> None:
         notice = poke_notice()
         plugin, message, api = build_plugin(
             notice,
@@ -315,6 +315,7 @@ class SendPokeTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("plugin.time.time", return_value=1000.0):
             result = await plugin.send_poke(
+                msg_id=None,
                 stream_id="stream-1",
                 chat_id="stream-1",
                 platform="qq",
@@ -331,13 +332,13 @@ class SendPokeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(api.calls[0]["kwargs"], {"user_id": "123456"})
 
-    async def test_non_string_msg_id_is_rejected_before_query(self) -> None:
+    async def test_non_string_non_null_msg_id_is_rejected_before_query(self) -> None:
         plugin, message, api = build_plugin(qq_message())
 
         result = await plugin.send_poke(123, stream_id="stream-1")
 
         self.assertFalse(result["success"])
-        self.assertIn("必须是字符串", result["content"])
+        self.assertIn("必须是字符串或 null", result["content"])
         self.assertEqual(message.calls, [])
         self.assertEqual(message.recent_calls, [])
         self.assertEqual(api.calls, [])

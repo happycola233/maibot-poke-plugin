@@ -94,26 +94,24 @@ class PokePlugin(MaiBotPlugin):
             "戳一戳是 QQ 的轻量互动功能，可以提醒某人或引起对方注意，比直接 @ 或点名更含蓄。"
             "当群聊或私聊的语境合适时，可以戳一戳某条消息的发送者（目标用户不需要先戳机器人）。"
             "有两种用法：①想戳某条普通消息的发送者，就传入这条消息真实的 msg_id；"
-            "②想回戳刚戳过机器人的人，仅当本会话最新的消息是戳向机器人的戳一戳消息，"
-            "且能唯一锁定同一个人时，才省略 msg_id、以 {} 调用。"
-            "空字符串、纯空白或随手填的内容都不是合法 msg_id，也不等于省略，"
-            "省略不会自动挑最近的普通消息；通知消息的 ID 也不能当作 msg_id。"
+            "②想回戳刚戳过机器人的人，就将 msg_id 设为 null。"
+            "插件只会在本会话最新的消息是戳向机器人的戳一戳消息，且能唯一锁定发起者时执行。"
             "不符合以上情形就不要调用，也不要使用其他会话或平台的消息。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "msg_id": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "description": (
-                        "可选。要戳某条普通消息的发送者时，填这条消息在当前 QQ 会话里真实的 msg_id；"
+                        "必填。要戳某条普通消息的发送者时，填这条消息在当前 QQ 会话里真实的 msg_id；"
                         "它不能为空，也不能是通知消息的 ID。"
-                        "想回戳刚戳过机器人的人时省略此参数、以 {} 调用（触发条件见工具说明）。"
+                        "想回戳刚戳过机器人的人时传 null（触发条件见工具说明）。"
                     ),
                     "minLength": 1,
                 }
             },
-            "required": [],
+            "required": ["msg_id"],
             "additionalProperties": False,
         },
         visibility="visible",
@@ -123,16 +121,17 @@ class PokePlugin(MaiBotPlugin):
     ) -> dict[str, Any]:
         """确认目标属于当前会话后，戳一戳该消息或最近通知的发送者。"""
 
+        # 对外 Schema 要求显式传 null；默认 None 仅保留旧调用链的安全兼容性。
         if msg_id is not None and not isinstance(msg_id, str):
             return self._failure(
-                "发送戳一戳失败：msg_id 必须是字符串。", stage="validation"
+                "发送戳一戳失败：msg_id 必须是字符串或 null。", stage="validation"
             )
         message_id = str(msg_id or "").strip()
         if msg_id is not None and not message_id:
             return self._failure(
-                "发送戳一戳失败：msg_id 是空字符串或纯空白，这既不是合法的消息 ID，也不等于省略，本次未执行。"
+                "发送戳一戳失败：msg_id 是空字符串或纯空白，这既不是合法的消息 ID，也不等于 null，本次未执行。"
                 "想戳某条普通消息的发送者，请填这条消息真实的 msg_id；"
-                "想回戳刚戳过机器人的人，请省略 msg_id、以 {} 调用。",
+                "想回戳刚戳过机器人的人，请将 msg_id 显式传为 null。",
                 stage="validation",
             )
         current_stream_id = str(stream_id or "").strip()

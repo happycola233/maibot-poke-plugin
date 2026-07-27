@@ -7,10 +7,10 @@
 插件本身不直接连接 QQ，也不实现协议适配，而是依赖 SnowLuma Adapter 公开的
 `adapter.napcat.message.send_poke` 插件 API。当前仅支持 **SnowLuma + SnowLuma Adapter** 链路，暂不支持 MaiBot 的 NapCat Adapter 或其他适配器。
 
-模型只会看到一个可选参数 `msg_id`：
+模型只会看到一个必填但可为 `null` 的参数 `msg_id`：
 
-- 提供 `msg_id` 时，目标是当前 QQ 会话中该普通消息的发送者。
-- 省略 `msg_id` 时，插件会尝试从当前会话最近的消息中找到刚刚戳向机器人的 SnowLuma 戳一戳通知，用于处理“用户只戳了机器人、没有发送普通消息”的情况。
+- 传入非空字符串 `msg_id` 时，目标是当前 QQ 会话中该普通消息的发送者。
+- 将 `msg_id` 显式传为 `null` 时，插件会尝试从当前会话最近的消息中找到刚刚戳向机器人的 SnowLuma 戳一戳通知，用于处理“用户只戳了机器人、没有发送普通消息”的情况。
 
 本插件不会监听戳一戳事件、缓存用户、自动触发戳一戳或修改 MaiBot、SnowLuma、SnowLuma Adapter。所有实际操作都必须由模型调用 Tool 后发生。
 
@@ -20,11 +20,11 @@
 - 显示名：`MaiBot 戳一戳插件`
 - LLM Tool：`send_poke`
 - Tool 必须保持 `visibility="visible"`。
-- Tool 只向模型公开可选的 `msg_id`，不要公开 `stream_id`、`user_id`、`group_id` 等会扩大调用范围的参数。
+- Tool 只向模型公开必填但可为 `null` 的 `msg_id`，不要公开 `stream_id`、`user_id`、`group_id` 等会扩大调用范围的参数。
 - `stream_id`、`chat_id`、`platform`、`user_id` 和 `group_id` 由 MaiBot Host 按当前对话注入。
 - 所有消息查询必须限定在当前 `stream_id`，并拒绝跨会话或非 QQ 消息。
-- 显式 `msg_id` 只能指向普通用户消息，不能把通知消息 ID 当作普通目标使用。
-- 省略 `msg_id` 时，只查询当前会话最近 20 条消息；只接受 120 秒内、处于最新时间点、目标为机器人且能唯一确定发起者的 SnowLuma `notify.poke` 通知。
+- 非空字符串 `msg_id` 只能指向普通用户消息，不能把通知消息 ID 当作普通目标使用。
+- `msg_id=null` 时，只查询当前会话最近 20 条消息；只接受 120 秒内、处于最新时间点、目标为机器人且能唯一确定发起者的 SnowLuma `notify.poke` 通知。
 - 回退取得内部通知 ID 后，必须再通过 `message.get_by_id` 复核会话、平台和通知身份；内部通知 ID 不得返回给模型。
 - 群聊调用底层 API 时传 `user_id` 和 `group_id`；私聊只传 `user_id`。
 - Host 调用成功不等于 QQ 操作成功；只有 SnowLuma 返回 `status="ok"` 且 `retcode` 为整数 `0` 才能报告成功。
