@@ -22,7 +22,7 @@
 
 ## 运行要求
 
-- MaiBot Host `>=1.0.6,<=1.1.99`
+- MaiBot Host `>=1.0.6,<=2.0.0`
 - `maibot-plugin-sdk >=2.7.0,<3.0.0`
 - SnowLuma Adapter `>=0.8.4,<1.0.0`
 - SnowLuma Adapter 已正确连接 SnowLuma
