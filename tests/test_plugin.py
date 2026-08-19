@@ -272,7 +272,7 @@ class ManifestContractTests(unittest.TestCase):
 
         self.assertEqual(manifest["manifest_version"], 2)
         self.assertEqual(manifest["id"], "github.happycola233.maibot-poke-plugin")
-        self.assertEqual(manifest["version"], "1.2.0")
+        self.assertEqual(manifest["version"], "1.2.1")
         self.assertEqual(manifest["plugin_type"], "tool")
         self.assertEqual(manifest["sdk"]["min_version"], "2.7.0")
         self.assertEqual(

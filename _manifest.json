@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.happycola233.maibot-poke-plugin",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "name": "MaiBot 戳一戳插件",
   "description": "将 SnowLuma Adapter 的 QQ 戳一戳能力注册为模型可自主调用的 send_poke 工具。",
   "author": {
