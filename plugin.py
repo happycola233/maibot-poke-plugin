@@ -15,6 +15,7 @@ RECENT_POKE_LIMIT = 20
 RECENT_POKE_MAX_AGE_SECONDS = 120.0
 RECENT_POKE_FUTURE_TOLERANCE_SECONDS = 5.0
 POKE_NOTICE_ID_PREFIX = "notice:notify:poke:"
+UNIFIED_NOTICE_ID_PREFIX = "qq-notice-"
 PokeNoticeIdentity = tuple[str, str]
 
 
@@ -478,7 +479,7 @@ class PokePlugin(MaiBotPlugin):
         """验证 SnowLuma 戳一戳通知，并返回内部消息 ID 与发起者 ID。"""
 
         message_id = str(message.get("message_id") or "").strip()
-        if not message_id.startswith(POKE_NOTICE_ID_PREFIX):
+        if not message_id.startswith((POKE_NOTICE_ID_PREFIX, UNIFIED_NOTICE_ID_PREFIX)):
             return None
         if str(message.get("session_id") or "").strip() != current_stream_id:
             return None
@@ -496,17 +497,49 @@ class PokePlugin(MaiBotPlugin):
             additional_config, Mapping
         ):
             return None
-        if str(additional_config.get("snowluma_notice_type") or "").strip() != "notify":
+        actor_user_id = cls._qq_id(user_info.get("user_id"))
+        self_id = cls._qq_id(additional_config.get("self_id"))
+        if message_id.startswith(POKE_NOTICE_ID_PREFIX):
+            notice_prefix = "snowluma"
+            target_id = cls._qq_id(additional_config.get("target_id"))
+        else:
+            # Adapter 1.x 统一使用 napcat_* 字段，目标保存在原始通知载荷中。
+            # 按 ID 格式选择完整的一套字段，不能混用新旧通知里的身份信息。
+            notice_prefix = "napcat"
+            payload = additional_config.get("napcat_notice_payload")
+            if not isinstance(payload, Mapping):
+                return None
+            if payload.get("notice_type") != "notify" or payload.get("sub_type") != "poke":
+                return None
+            payload_actor = cls._qq_id(
+                payload.get("operator_id") or payload.get("user_id")
+            )
+            if (
+                payload_actor != actor_user_id
+                or cls._qq_id(payload.get("self_id")) != self_id
+            ):
+                return None
+            group_info = message_info.get("group_info")
+            group_id = (
+                cls._qq_id(group_info.get("group_id"))
+                if isinstance(group_info, Mapping)
+                else None
+            )
+            if cls._qq_id(payload.get("group_id")) != group_id:
+                return None
+            target_id = cls._qq_id(payload.get("target_id"))
+
+        if (
+            str(additional_config.get(f"{notice_prefix}_notice_type") or "").strip()
+            != "notify"
+        ):
             return None
         if (
-            str(additional_config.get("snowluma_notice_sub_type") or "").strip()
+            str(additional_config.get(f"{notice_prefix}_notice_sub_type") or "").strip()
             != "poke"
         ):
             return None
 
-        actor_user_id = cls._qq_id(user_info.get("user_id"))
-        target_id = cls._qq_id(additional_config.get("target_id"))
-        self_id = cls._qq_id(additional_config.get("self_id"))
         if (
             actor_user_id is None
             or target_id is None

@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
+
+from packaging.specifiers import SpecifierSet
 
 from plugin import PokePlugin, SNOWLUMA_SEND_POKE_API
 
@@ -99,7 +102,7 @@ def qq_message(
 
 def poke_notice(
     *,
-    message_id: str = "notice:notify:poke:abc123",
+    message_id: str | None = None,
     timestamp: Any = "1000.0",
     session_id: str = "stream-1",
     platform: str = "qq",
@@ -111,6 +114,7 @@ def poke_notice(
     notice_type: str = "notify",
     notice_sub_type: str = "poke",
     additional_config: Any = None,
+    unified: bool = False,
 ) -> dict[str, Any]:
     """构造与 SnowLuma Adapter 入站通知一致的消息字典。"""
 
@@ -124,8 +128,28 @@ def poke_notice(
         if additional_config is None
         else additional_config
     )
+    if unified and additional_config is None:
+        # Adapter 1.x 使用统一通知格式；Host 会补齐私聊的 group_info=None。
+        payload = {
+            "post_type": "notice",
+            "notice_type": notice_type,
+            "sub_type": notice_sub_type,
+            "user_id": user_id,
+            "self_id": self_id,
+            "target_id": target_id,
+        }
+        if isinstance(group_info, dict):
+            payload["group_id"] = group_info["group_id"]
+        notice_config = {
+            "self_id": self_id,
+            "napcat_notice_type": notice_type,
+            "napcat_notice_sub_type": notice_sub_type,
+            "napcat_notice_payload": payload,
+        }
     return qq_message(
-        message_id=message_id,
+        message_id=message_id if message_id is not None else (
+            "qq-notice-abc123" if unified else "notice:notify:poke:abc123"
+        ),
         timestamp=timestamp,
         session_id=session_id,
         platform=platform,
@@ -272,7 +296,7 @@ class ManifestContractTests(unittest.TestCase):
 
         self.assertEqual(manifest["manifest_version"], 2)
         self.assertEqual(manifest["id"], "github.happycola233.maibot-poke-plugin")
-        self.assertEqual(manifest["version"], "1.2.1")
+        self.assertEqual(manifest["version"], "1.2.2")
         self.assertEqual(manifest["plugin_type"], "tool")
         self.assertEqual(manifest["sdk"]["min_version"], "2.7.0")
         self.assertEqual(
@@ -286,8 +310,142 @@ class ManifestContractTests(unittest.TestCase):
         }
         self.assertIn("maibot-team.snowluma-adapter", plugin_dependencies)
 
+    def test_adapter_dependency_accepts_supported_versions(self) -> None:
+        manifest_path = Path(__file__).resolve().parents[1] / "_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        dependency = next(
+            item for item in manifest["dependencies"]
+            if item.get("type") == "plugin"
+            and item["id"] == "maibot-team.snowluma-adapter"
+        )
+        # 与 MaiBot Host 使用相同的版本约束解析器，覆盖截图中的 1.0.1。
+        specifier = SpecifierSet(dependency["version_spec"])
+        for version in ("0.8.4", "0.9.0", "1.0.0", "1.0.1"):
+            with self.subTest(version=version):
+                self.assertTrue(specifier.contains(version, prereleases=True))
+        for version in ("0.8.3", "2.0.0"):
+            with self.subTest(version=version):
+                self.assertFalse(specifier.contains(version, prereleases=True))
+
 
 class SendPokeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unified_poke_supports_group_and_private_chat(self) -> None:
+        for group_id in ("", "654321"):
+            with self.subTest(group_id=group_id):
+                notice = poke_notice(
+                    unified=True,
+                    group_info={"group_id": group_id} if group_id else None,
+                )
+                plugin, message, api = build_plugin(
+                    notice,
+                    {"status": "ok", "retcode": 0},
+                    recent_result=[qq_message(timestamp="900.0"), notice],
+                )
+                with patch("plugin.time.time", return_value=1000.0):
+                    result = await invoke_send_poke(plugin, msg_id=None, group_id=group_id)
+
+                self.assertTrue(result["success"])
+                self.assertEqual(result["target_source"], "recent_poke")
+                self.assertNotIn(notice["message_id"], json.dumps(result))
+                self.assertEqual(message.recent_calls, [{"chat_id": "stream-1", "limit": 20}])
+                self.assertEqual(message.calls, [{
+                    "message_id": notice["message_id"],
+                    "stream_id": "stream-1",
+                    "include_binary_data": False,
+                }])
+                expected_args = {"user_id": "123456"}
+                if group_id:
+                    expected_args["group_id"] = group_id
+                self.assertEqual(api.calls, [{
+                    "api_name": SNOWLUMA_SEND_POKE_API,
+                    "version": "1",
+                    "kwargs": expected_args,
+                }])
+
+    async def test_unified_notice_id_cannot_be_used_as_explicit_msg_id(self) -> None:
+        notice = poke_notice(unified=True)
+        plugin, message, api = build_plugin(notice)
+        result = await invoke_send_poke(plugin, msg_id=notice["message_id"])
+        self.assertFalse(result["success"])
+        self.assertIn("不能使用通知消息 ID", result["content"])
+        self.assertEqual(message.recent_calls, [])
+        self.assertEqual(api.calls, [])
+
+    async def test_unified_poke_rejects_invalid_or_inconsistent_payload(self) -> None:
+        candidates = [
+            poke_notice(unified=True, is_notify=False),
+            poke_notice(unified=True, session_id="stream-2"),
+            poke_notice(unified=True, platform="discord"),
+            poke_notice(unified=True, message_id="ordinary-id"),
+            poke_notice(unified=True, message_id="notice:notify:poke:abc123"),
+            poke_notice(message_id="qq-notice-abc123"),
+            poke_notice(unified=True, notice_type="group_recall"),
+            poke_notice(unified=True, notice_sub_type="other"),
+            poke_notice(unified=True, target_id="888888"),
+            poke_notice(unified=True, user_id="999999"),
+            poke_notice(unified=True, self_id=""),
+        ]
+        for payload in (None, [], "invalid", {}):
+            notice = poke_notice(unified=True)
+            notice["message_info"]["additional_config"]["napcat_notice_payload"] = payload
+            candidates.append(notice)
+        for key, value in (
+            ("notice_type", "group_recall"), ("sub_type", "other"),
+            ("user_id", "222222"), ("self_id", "888888"),
+            ("target_id", None), ("operator_id", "222222"),
+            ("group_id", "654321"),
+        ):
+            notice = poke_notice(unified=True)
+            notice["message_info"]["additional_config"]["napcat_notice_payload"][key] = value
+            candidates.append(notice)
+        for notice in candidates:
+            with self.subTest(notice=notice):
+                plugin, message, api = build_plugin(notice, recent_result=[notice])
+                with patch("plugin.time.time", return_value=1000.0):
+                    result = await invoke_send_poke(plugin, msg_id=None)
+                self.assertFalse(result["success"])
+                self.assertEqual(message.calls, [])
+                self.assertEqual(api.calls, [])
+
+    async def test_unified_poke_keeps_latest_time_and_unique_actor_rules(self) -> None:
+        notice = poke_notice(unified=True)
+        cases = [
+            ([poke_notice(unified=True, timestamp="800.0")], "安全回戳范围"),
+            ([notice, qq_message(timestamp="1001.0")], "不是可确认的"),
+            ([notice, poke_notice(timestamp="1001.0", target_id="888888")], "不是可确认的"),
+            ([notice, poke_notice(user_id="222222")], "多位用户"),
+        ]
+        for recent, expected in cases:
+            with self.subTest(recent=recent):
+                plugin, message, api = build_plugin(notice, recent_result=recent)
+                with patch("plugin.time.time", return_value=1001.0):
+                    result = await invoke_send_poke(plugin, msg_id=None)
+                self.assertFalse(result["success"])
+                self.assertIn(expected, result["content"])
+                self.assertEqual(message.calls, [])
+                self.assertEqual(api.calls, [])
+
+    async def test_unified_poke_is_revalidated_by_id(self) -> None:
+        notice = poke_notice(unified=True)
+        changed_target = deepcopy(notice)
+        changed_target["message_info"]["additional_config"]["napcat_notice_payload"]["target_id"] = "888888"
+        for confirmed in (
+            None, changed_target,
+            poke_notice(unified=True, user_id="222222"),
+            poke_notice(unified=True, session_id="stream-2"),
+            poke_notice(unified=True, platform="discord"),
+            poke_notice(unified=True, group_info={"group_id": "654321"}),
+        ):
+            with self.subTest(confirmed=confirmed):
+                plugin, message, api = build_plugin(confirmed, recent_result=[notice])
+                with patch("plugin.time.time", return_value=1000.0):
+                    result = await invoke_send_poke(plugin, msg_id=None)
+                self.assertFalse(result["success"])
+                self.assertEqual(len(message.calls), 1)
+                self.assertEqual(message.calls[0]["stream_id"], "stream-1")
+                self.assertNotIn(notice["message_id"], json.dumps(result))
+                self.assertEqual(api.calls, [])
+
     async def test_explicit_blank_msg_id_is_rejected_before_query(self) -> None:
         for blank_msg_id in ("", " ", " \t\n"):
             with self.subTest(msg_id=repr(blank_msg_id)):

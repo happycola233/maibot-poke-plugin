@@ -24,11 +24,17 @@
 
 - MaiBot Host `>=1.0.6,<=2.0.0`
 - `maibot-plugin-sdk >=2.7.0,<3.0.0`
-- SnowLuma Adapter `>=0.8.4,<1.0.0`
+- SnowLuma Adapter `>=0.8.4,<2.0.0`（包含 `1.0.1`）
 - SnowLuma Adapter 已正确连接 SnowLuma
 
 这些范围也写在根目录的 `_manifest.json` 中，由 MaiBot Host 在加载前校验。本插件仅提供标准启用元配置，
 不提供戳一戳业务参数。
+
+兼容旧版 Adapter 的 `notice:notify:poke:*` / `snowluma_notice_*` 通知，以及 1.x 的
+`qq-notice-*` / `napcat_notice_*` 通知。新版从 `napcat_notice_payload` 读取被戳目标，
+并校验原始通知与消息中的发起者、机器人和群号一致。字段名中的 `napcat` 来自新版统一通知格式，
+本插件仍通过 `maibot-team.snowluma-adapter` 调用，不代表支持独立的 MaiBot NapCat Adapter。
+实现依据为 [Adapter 1.0.1 通知源码](https://github.com/Mai-with-u/MaiBot-SnowLuma-Adapter/blob/4a7f2b484796bc2b82e37dbe63068b5094082b30/codecs/notice/message_codec.py)。
 
 ## 安装
 
@@ -114,12 +120,13 @@ API 未找到、Adapter 未连接、RPC 超时、跨会话消息、非 QQ 消息
 安装开发所需 SDK 后运行标准库单元测试：
 
 ```shell
-python -m pip install "maibot-plugin-sdk>=2.7.0,<3.0.0"
+python -m pip install "maibot-plugin-sdk>=2.7.0,<3.0.0" packaging
 python -m unittest discover -s tests -v
 ```
 
 单元测试覆盖最小配置 Schema、Tool 可见性、参数 Schema、空会话保护、Host 两层失败、跨会话/非 QQ 拒绝、
-群聊与私聊参数差异、最近通知回退、通知过期与同秒歧义拒绝，以及 SnowLuma `status` / `retcode` 的严格判定。
+群聊与私聊参数差异、新旧通知格式回退、通知过期与同秒歧义拒绝、Adapter 依赖版本边界，以及
+SnowLuma `status` / `retcode` 的严格判定。`packaging` 仅供测试使用，用于按 Host 的方式解析依赖版本约束。
 发布前仍建议在真实 QQ 群聊和私聊各完成一次端到端测试。
 
 ## Manifest 能力
@@ -141,6 +148,12 @@ Manifest 使用 v2，`plugin_type` 为 `tool`，并显式依赖 `maibot-team.sno
 - [MaiBot 插件中心贡献指南](https://github.com/Mai-with-u/plugin-repo/blob/main/CONTRIBUTING.md)
 
 ## 常见问题与故障排查
+
+### 安装了 SnowLuma Adapter 1.0.1，为什么提示依赖未满足？
+
+戳一戳插件 `1.2.1` 及更早版本的依赖上限为 `<1.0.0`，会在加载前拒绝 Adapter `1.0.1`。
+请更新到包含此修复的戳一戳插件 `1.2.2` 或后续版本，然后重新加载插件或重启 MaiBot。
+本次更新同时兼容了新版通知格式；只修改旧安装中的依赖上限，会导致 `msg_id=null` 的回戳仍无法识别通知。
 
 ### 用户刚戳了机器人，为什么仍然没有戳回？
 
